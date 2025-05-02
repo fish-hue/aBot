@@ -7,6 +7,7 @@ import csv
 import os
 import time
 import argparse
+import json
 from bs4 import BeautifulSoup
 from pyppeteer import launch
 
@@ -64,6 +65,12 @@ class VulnerabilityScanner:
 
         self.log_text = tk.Text(self.root, height=15, width=80)
         self.log_text.grid(row=6, column=0, columnspan=3)
+
+        # Add Save and Load buttons
+        self.save_button = ttk.Button(self.root, text="Save Config", command=self.save_config)
+        self.save_button.grid(row=7, column=0)
+        self.load_button = ttk.Button(self.root, text="Load Config", command=self.load_config)
+        self.load_button.grid(row=7, column=1)
 
     def log(self, message):
         if self.root:
@@ -257,6 +264,33 @@ class VulnerabilityScanner:
         with open("report.html", "w") as f:
             f.write(html)
 
+    def save_config(self):
+        config = {
+            "url": self.url_entry.get().strip(),
+            "proxies": self.get_proxies(),
+            "headers": self.get_headers(),
+            "cookies": self.get_cookies()
+        }
+        with open("config.json", "w") as f:
+            json.dump(config, f, indent=4)
+        self.log("Configuration saved to config.json")
+
+    def load_config(self):
+        if os.path.exists("config.json"):
+            with open("config.json", "r") as f:
+                config = json.load(f)
+                self.url_entry.delete(0, tk.END)
+                self.url_entry.insert(0, config.get("url", ""))
+                self.proxy_entry.delete(0, tk.END)
+                self.proxy_entry.insert(0, ",".join(config.get("proxies", [])))
+                self.header_entry.delete(0, tk.END)
+                self.header_entry.insert(0, ",".join(f"{k}:{v}" for k, v in config.get("headers", {}).items()))
+                self.cookie_entry.delete(0, tk.END)
+                self.cookie_entry.insert(0, ",".join(f"{k}={v}" for k, v in config.get("cookies", {}).items()))
+            self.log("Configuration loaded from config.json")
+        else:
+            self.log("No configuration file found.")
+            
 # -- Main execution block --
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
