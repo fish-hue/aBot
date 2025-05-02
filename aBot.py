@@ -2,31 +2,34 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import asyncio
 import aiohttp
-from urllib.parse import urlparse, urljoin, parse_qs, urlencode
+from urllib.parse import urlparse, urljoin, urlunparse
 import csv
 import os
-import re
-import random
 import time
 import argparse
 from bs4 import BeautifulSoup
+from pyppeteer import launch
+
+SQLI_PAYLOADS = ["' OR '1'='1", "';--", "\" OR \"1\"=\"1", "admin' --"]
 
 class VulnerabilityScanner:
-    def __init__(self, root=None):
+    def __init__(self, root=None, url=None, proxies=None, headers=None, cookies=None):
         self.root = root
-        if self.root:
-            self.setup_gui()
-
+        self.url = url
+        self.proxies = proxies or []
+        self.headers = headers or {}
+        self.cookies = cookies or {}
         self.loop = asyncio.get_event_loop()
         self.tasks = []
         self.paused = False
         self.total_urls = 0
         self.processed_urls = 0
-        self.proxies = []
-        self.headers = {}
-        self.cookies = {}
         self.proxy_index = 0
         self.results = []
+        self.semaphore = asyncio.Semaphore(10)  # Limit concurrency to 10 requests
+
+        if self.root:
+            self.setup_gui()
 
     def setup_gui(self):
         self.root.title("Async Vulnerability Scanner")
@@ -73,30 +76,20 @@ class VulnerabilityScanner:
         self.log_text.see(tk.END)
 
     def get_headers(self):
-        if self.root:
-            raw_headers = self.header_entry.get()
-            headers = {}
-            for pair in raw_headers.split(','):
-                if ':' in pair:
-                    k, v = pair.split(':', 1)
-                    headers[k.strip()] = v.strip()
-            return headers
+        raw_headers = self.header_entry.get()
+        if raw_headers:
+            return {k.strip(): v.strip() for k, v in (pair.split(":") for pair in raw_headers.split(","))}
         return self.headers
 
     def get_cookies(self):
-        if self.root:
-            raw_cookies = self.cookie_entry.get()
-            cookies = {}
-            for pair in raw_cookies.split(','):
-                if '=' in pair:
-                    k, v = pair.split('=', 1)
-                    cookies[k.strip()] = v.strip()
-            return cookies
+        raw_cookies = self.cookie_entry.get()
+        if raw_cookies:
+            return {k.strip(): v.strip() for k, v in (pair.split("=") for pair in raw_cookies.split(","))}
         return self.cookies
 
     def get_proxies(self):
-        if self.root:
-            raw = self.proxy_entry.get()
+        raw = self.proxy_entry.get()
+        if raw:
             return [p.strip() for p in raw.split(',') if p.strip()]
         return self.proxies
 
@@ -109,25 +102,32 @@ class VulnerabilityScanner:
 
     def pause_scan(self):
         self.paused = True
-        if self.root:
-            self.pause_button.config(state=tk.DISABLED)
-            self.resume_button.config(state=tk.NORMAL)
+        self.update_ui_on_pause()
         self.log("Scan paused.")
 
     def resume_scan(self):
         self.paused = False
+        self.update_ui_on_resume()
+        self.log("Scan resumed.")
+
+    def update_ui_on_pause(self):
+        if self.root:
+            self.pause_button.config(state=tk.DISABLED)
+            self.resume_button.config(state=tk.NORMAL)
+
+    def update_ui_on_resume(self):
         if self.root:
             self.pause_button.config(state=tk.NORMAL)
             self.resume_button.config(state=tk.DISABLED)
-        self.log("Scan resumed.")
 
     def start_scan(self):
         if self.root:
             self.start_button.config(state=tk.DISABLED)
             self.pause_button.config(state=tk.NORMAL)
             self.resume_button.config(state=tk.DISABLED)
-        url = self.url_entry.get().strip()
-        if not url:
+        
+        self.url = self.url_entry.get().strip()
+        if not self.url:
             if self.root:
                 messagebox.showerror("Error", "Please enter a target URL")
             return
@@ -135,11 +135,37 @@ class VulnerabilityScanner:
         self.proxies = self.get_proxies()
         self.headers = self.get_headers()
         self.cookies = self.get_cookies()
-        self.loop.create_task(self.scan(url))
+        self.loop.create_task(self.scan(self.url))
+
+    def normalize_url(self, url):
+        parsed = urlparse(url)
+        parsed = parsed._replace(fragment='')
+        path = parsed.path
+        if path != '/' and path.endswith('/'):
+            path = path.rstrip('/')
+        elif not path:
+            path = '/'
+        parsed = parsed._replace(path=path)
+        return urlunparse(parsed)
+
+    async def crawl(self, url):
+        urls = set()
+        try:
+            async with aiohttp.ClientSession() as session:
+                html = await self.fetch(session, url)
+                soup = BeautifulSoup(html, "html.parser")
+                for tag in soup.find_all(['a', 'form', 'script']):
+                    href = tag.get('href') or tag.get('action') or tag.get('src')
+                    if href:
+                        full_url = urljoin(url, href)
+                        normalized_url = self.normalize_url(full_url)
+                        if urlparse(normalized_url).netloc == urlparse(url).netloc:
+                            urls.add(normalized_url)
+        except Exception as e:
+            self.log(f"Crawl error: {e}")
+        return list(urls)
 
     async def fetch(self, session, url):
-        while self.paused:
-            await asyncio.sleep(0.5)
         tries = 3
         for attempt in range(tries):
             try:
@@ -154,32 +180,6 @@ class VulnerabilityScanner:
                 await asyncio.sleep(1)
         return ""
 
-    async def crawl(self, url):
-        urls = set()
-        try:
-            async with aiohttp.ClientSession() as session:
-                html = await self.fetch(session, url)
-                soup = BeautifulSoup(html, "html.parser")
-                for tag in soup.find_all(['a', 'form', 'script']):
-                    href = tag.get('href') or tag.get('action') or tag.get('src')
-                    if href:
-                        full_url = urljoin(url, href)
-                        if urlparse(full_url).netloc == urlparse(url).netloc:
-                            urls.add(full_url)
-        except Exception as e:
-            self.log(f"Crawl error: {e}")
-        return list(urls)
-
-    def _inject_payload(self, url, payload):
-        parsed = urlparse(url)
-        query = parse_qs(parsed.query)
-        if not query:
-            return url
-        for key in query:
-            query[key] = [payload]
-        new_query = urlencode(query, doseq=True)
-        return parsed._replace(query=new_query).geturl()
-
     async def test_xss(self, session, url):
         payload = "<script>alert('xss')</script>"
         test_url = self._inject_payload(url, payload)
@@ -188,6 +188,15 @@ class VulnerabilityScanner:
             self.log(f"[XSS] Found at {test_url}")
             self._save_result("XSS", test_url, "High")
 
+    async def test_sqli(self, session, url):
+        for payload in SQLI_PAYLOADS:
+            test_url = self._inject_payload(url, payload)
+            content = await self.fetch(session, test_url)
+            if any(err in content.lower() for err in ["sql syntax", "mysql", "sqlite", "pg_query", "unexpected end of SQL", "unclosed quotation mark"]):
+                self.log(f"[SQL Injection] Found at {test_url} with payload: {payload}")
+                self._save_result("SQL Injection", test_url, "High")
+                break
+
     async def test_cmd_injection(self, session, url):
         payload = ";echo vulncmd"
         test_url = self._inject_payload(url, payload)
@@ -195,6 +204,33 @@ class VulnerabilityScanner:
         if "vulncmd" in content:
             self.log(f"[CMD Injection] Found at {test_url}")
             self._save_result("Command Injection", test_url, "High")
+
+    async def scan(self, base_url):
+        urls = await self.crawl(base_url)
+        unique_urls = set(self.normalize_url(u) for u in urls)
+        urls = list(unique_urls)
+
+        self.total_urls = len(urls)
+        self.processed_urls = 0
+        if self.root:
+            self.progress_bar["maximum"] = self.total_urls
+
+        async with aiohttp.ClientSession() as session:
+            tasks = [
+                self.test_xss(session, url) for url in urls
+            ] + [
+                self.test_sqli(session, url) for url in urls
+            ] + [
+                self.test_cmd_injection(session, url) for url in urls
+            ]
+            await asyncio.gather(*tasks)
+
+        self.generate_html_report()
+        self.log("Scan complete. HTML report generated as 'report.html'.")
+        if self.root:
+            self.start_button.config(state=tk.NORMAL)
+            self.pause_button.config(state=tk.DISABLED)
+            self.resume_button.config(state=tk.DISABLED)
 
     def _save_result(self, vuln_type, url, severity):
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -221,34 +257,7 @@ class VulnerabilityScanner:
         with open("report.html", "w") as f:
             f.write(html)
 
-    async def scan(self, base_url):
-        urls = await self.crawl(base_url)
-        self.total_urls = len(urls)
-        self.processed_urls = 0
-        if self.root:
-            self.progress_bar["maximum"] = self.total_urls
-
-        async with aiohttp.ClientSession() as session:
-            for url in urls:
-                if self.paused:
-                    while self.paused:
-                        await asyncio.sleep(0.5)
-                await asyncio.gather(
-                    self.test_xss(session, url),
-                    self.test_cmd_injection(session, url),
-                )
-                self.processed_urls += 1
-                if self.root:
-                    self.progress_bar["value"] = self.processed_urls
-                self.log(f"Processed {self.processed_urls}/{self.total_urls}: {url}")
-
-        self.generate_html_report()
-        self.log("Scan complete. HTML report generated as 'report.html'.")
-        if self.root:
-            self.start_button.config(state=tk.NORMAL)
-            self.pause_button.config(state=tk.DISABLED)
-            self.resume_button.config(state=tk.DISABLED)
-
+# -- Main execution block --
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", help="Target URL")
@@ -258,26 +267,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.url:
-        scanner = VulnerabilityScanner()
-        scanner.headers = {k.strip(): v.strip() for k, v in
-                           [h.split(":") for h in args.headers.split(",")]} if args.headers else {}
-        scanner.cookies = {k.strip(): v.strip() for k, v in
-                           [c.split("=") for c in args.cookies.split(",")]} if args.cookies else {}
-        scanner.proxies = [p.strip() for p in args.proxies.split(",")] if args.proxies else []
-
-        async def run_scan():
-            await scanner.scan(args.url)
-
-        try:
-            asyncio.run(run_scan())
-        except RuntimeError as e:
-            if "already running" in str(e):
-                loop = asyncio.get_event_loop()
-                loop.create_task(run_scan())
-                loop.run_forever()
-            else:
-                raise
+        scanner = VulnerabilityScanner(url=args.url, headers={k.strip(): v.strip() for k, v in (pair.split(":") for pair in args.headers.split(","))}, cookies={k.strip(): v.strip() for k, v in (pair.split("=") for pair in args.cookies.split(","))}, proxies=[p.strip() for p in args.proxies.split(",")])
+        asyncio.run(scanner.scan(args.url))
     else:
         root = tk.Tk()
-        app = VulnerabilityScanner(root)
+        scanner = VulnerabilityScanner(root=root)
         root.mainloop()
