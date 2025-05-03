@@ -161,7 +161,7 @@ def update_results(results):
 
 # GUI
 root = tk.Tk()
-root.title("Async Vulnerability Scanner")
+root.title("aBot Vulnerability Scanner")
 root.geometry("700x650")
 
 url_label = tk.Label(root, text="Target URL:")
