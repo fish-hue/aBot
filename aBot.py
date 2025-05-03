@@ -1,266 +1,167 @@
-import tkinter as tk
-from tkinter import ttk, messagebox
 import asyncio
 import aiohttp
-from urllib.parse import urlparse, urljoin, urlunparse
-import csv
-import os
-import time
-import argparse
-import json
-from bs4 import BeautifulSoup
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext
+import threading
+import re
 
-SQLI_PAYLOADS = ["' OR '1'='1", "';--", "\" OR \"1\"=\"1", "admin' --"]
-
-class VulnerabilityScanner:
-    def __init__(self, root=None, url=None, proxies=None, headers=None, cookies=None):
-        self.root = root
-        self.url = url
-        self.proxies = proxies or []
-        self.headers = headers or {}
-        self.cookies = cookies or {}
-        self.loop = asyncio.get_event_loop()
-        self.paused = False
-        self.total_urls = 0
-        self.processed_urls = 0
-        self.proxy_index = 0
-        self.results = []
-        self.semaphore = asyncio.Semaphore(10)
-
-        if self.root:
-            self.setup_gui()
-
-    def setup_gui(self):
-        self.root.title("Async Vulnerability Scanner")
-
-        entries = [
-            ("Target URL:", 0),
-            ("Proxies (comma-separated):", 1),
-            ("Headers (key:value, comma-separated):", 2),
-            ("Cookies (key=value, comma-separated):", 3)
-        ]
-        self.entries = {}
-        for label, row in entries:
-            ttk.Label(self.root, text=label).grid(row=row, column=0, sticky=tk.W)
-            entry = ttk.Entry(self.root, width=50)
-            entry.grid(row=row, column=1, columnspan=2, sticky=tk.W)
-            self.entries[label] = entry
-
-        self.start_button = ttk.Button(self.root, text="Start Scan", command=self.start_scan)
-        self.start_button.grid(row=4, column=0)
-        self.pause_button = ttk.Button(self.root, text="Pause", command=self.pause_scan, state=tk.DISABLED)
-        self.pause_button.grid(row=4, column=1)
-        self.resume_button = ttk.Button(self.root, text="Resume", command=self.resume_scan, state=tk.DISABLED)
-        self.resume_button.grid(row=4, column=2)
-
-        self.progress_bar = ttk.Progressbar(self.root, length=400, mode='determinate')
-        self.progress_bar.grid(row=5, column=0, columnspan=3, sticky=tk.W)
-        self.log_text = tk.Text(self.root, height=15, width=80)
-        self.log_text.grid(row=6, column=0, columnspan=3)
-
-        self.save_button = ttk.Button(self.root, text="Save Config", command=self.save_config)
-        self.save_button.grid(row=7, column=0)
-        self.load_button = ttk.Button(self.root, text="Load Config", command=self.load_config)
-        self.load_button.grid(row=7, column=1)
-
-    def log(self, message):
-        if self.root:
-            self.root.after(0, self._append_log, message)
-        else:
-            print(message)
-
-    def _append_log(self, message):
-        self.log_text.insert(tk.END, message + "\n")
-        self.log_text.see(tk.END)
-
-    def get_entry_data(self, label):
-        return self.entries[label].get().strip()
-
-    def parse_headers(self, raw):
-        return self._parse_pairs(raw, ":", "header")
-
-    def parse_cookies(self, raw):
-        return self._parse_pairs(raw, "=", "cookie")
-
-    def _parse_pairs(self, raw, delimiter, pair_type):
-        result = {}
-        for pair in raw.split(","):
-            if delimiter in pair:
-                key, value = pair.split(delimiter, 1)
-                result[key.strip()] = value.strip()
-            elif pair.strip():
-                self.log(f"Invalid {pair_type} format: '{pair}'. Expected 'Key{delimiter}Value'. Skipping.")
-        return result
-
-    def parse_proxies(self, raw):
-        return [proxy.strip() for proxy in raw.split(",") if proxy.strip()]
-
-    def get_next_proxy(self):
-        if not self.proxies:
-            return None
-        proxy = self.proxies[self.proxy_index % len(self.proxies)]
-        self.proxy_index += 1
-        return proxy
-
-    def pause_scan(self):
-        self.paused = True
-        self.pause_button.config(state=tk.DISABLED)
-        self.resume_button.config(state=tk.NORMAL)
-        self.log("Scan paused.")
-
-    def resume_scan(self):
-        self.paused = False
-        self.pause_button.config(state=tk.NORMAL)
-        self.resume_button.config(state=tk.DISABLED)
-        self.log("Scan resumed.")
-
-    def start_scan(self):
-        self.url = self.get_entry_data("Target URL:")
-        if not self.url:
-            messagebox.showerror("Error", "Please enter a target URL")
-            return
-
-        self.proxies = self.parse_proxies(self.get_entry_data("Proxies (comma-separated):"))
-        self.headers = self.parse_headers(self.get_entry_data("Headers (key:value, comma-separated):"))
-        self.cookies = self.parse_cookies(self.get_entry_data("Cookies (key=value, comma-separated):"))
-
-        self.start_button.config(state=tk.DISABLED)
-        self.pause_button.config(state=tk.NORMAL)
-        self.resume_button.config(state=tk.DISABLED)
-
-        asyncio.ensure_future(self.scan(self.url))
-
-    def normalize_url(self, url):
-        parsed = urlparse(url)._replace(fragment='')
-        path = parsed.path or '/'
-        if path != '/' and path.endswith('/'):
-            path = path.rstrip('/')
-        parsed = parsed._replace(path=path)
-        return urlunparse(parsed)
-
-    async def crawl(self, url):
-        urls = set()
+# Vulnerability scanning functions
+async def scan_sql_injection(session, url, results):
+    test_payloads = ["'", "' OR '1'='1"]
+    for payload in test_payloads:
+        test_url = f"{url}?test={payload}"
         try:
-            async with aiohttp.ClientSession() as session:
-                html = await self.fetch(session, url)
-                soup = BeautifulSoup(html, "html.parser")
-                for tag in soup.find_all(['a', 'form', 'script']):
-                    href = tag.get('href') or tag.get('action') or tag.get('src')
-                    if href:
-                        full_url = urljoin(url, href)
-                        normalized_url = self.normalize_url(full_url)
-                        if urlparse(normalized_url).netloc == urlparse(url).netloc:
-                            urls.add(normalized_url)
+            async with session.get(test_url, timeout=10) as response:
+                text = await response.text()
+                if "sql" in text.lower() or "syntax" in text.lower():
+                    results.append(f"[SQLi] {test_url} may be vulnerable.")
         except Exception as e:
-            self.log(f"Crawl error: {e}")
-        return list(urls)
+            results.append(f"[SQLi ERROR] {test_url} - {e}")
 
-    async def fetch(self, session, url):
-        for attempt in range(3):
+async def scan_xss(session, url, results):
+    payload = "<script>alert(1)</script>"
+    test_url = f"{url}?q={payload}"
+    try:
+        async with session.get(test_url, timeout=10) as response:
+            text = await response.text()
+            if payload in text:
+                results.append(f"[XSS] {test_url} may be vulnerable.")
+    except Exception as e:
+        results.append(f"[XSS ERROR] {test_url} - {e}")
+
+async def scan_command_injection(session, url, results):
+    payloads = [';id', '&& whoami']
+    for payload in payloads:
+        test_url = f"{url}?cmd={payload}"
+        try:
+            async with session.get(test_url, timeout=10) as response:
+                text = await response.text()
+                if "uid=" in text or "root" in text or "whoami" in text:
+                    results.append(f"[CMDi] {test_url} may be vulnerable.")
+        except Exception as e:
+            results.append(f"[CMDi ERROR] {test_url} - {e}")
+
+async def run_scans(url, headers, cookies, proxy, enable_sql, enable_xss, enable_cmdi, results_callback):
+    results = []
+
+    if not any([enable_sql, enable_xss, enable_cmdi]):
+        results_callback(["Please select at least one scan module."])
+        return
+
+    try:
+        if not url.startswith("http"):
+            url = "http://" + url
+
+        timeout = aiohttp.ClientTimeout(total=15)
+        conn = aiohttp.TCPConnector(ssl=False)
+        session_headers = {}
+        session_cookies = {}
+
+        if headers:
             try:
-                proxy = self.get_next_proxy()
-                kwargs = {"headers": self.headers, "cookies": self.cookies}
-                if proxy:
-                    kwargs["proxy"] = f"http://{proxy}"
-                async with session.get(url, timeout=10, **kwargs) as response:
-                    return await response.text()
-            except Exception as e:
-                self.log(f"Attempt {attempt + 1}/3 failed for {url}: {e}")
-                await asyncio.sleep(1)
-        return ""
+                session_headers = dict([line.split(":", 1) for line in headers.split("\n") if ":" in line])
+            except:
+                results.append("[ERROR] Invalid headers format.")
+        if cookies:
+            try:
+                session_cookies = dict([cookie.strip().split("=", 1) for cookie in cookies.split(";") if "=" in cookie])
+            except:
+                results.append("[ERROR] Invalid cookies format.")
 
-    async def _test_payload(self, session, url, payload, vuln_type, check):
-        test_url = url + payload
-        content = await self.fetch(session, test_url)
-        if check(content):
-            self.log(f"[{vuln_type}] Found at {test_url}")
-            self._save_result(vuln_type, test_url, "High")
+        async with aiohttp.ClientSession(headers=session_headers, cookies=session_cookies, connector=conn, timeout=timeout) as session:
+            if proxy:
+                session._default_proxy = proxy
 
-    async def test_xss(self, session, url):
-        payload = "<script>alert('xss')</script>"
-        await self._test_payload(session, url, payload, "XSS", lambda c: payload in c)
-
-    async def test_sqli(self, session, url):
-        for payload in SQLI_PAYLOADS:
-            await self._test_payload(session, url, payload, "SQL Injection", 
-                lambda c: any(err in c.lower() for err in ["sql syntax", "mysql", "sqlite", "pg_query", "unexpected end of sql", "unclosed quotation mark"]))
-
-    async def test_cmd_injection(self, session, url):
-        payload = ";echo vulncmd"
-        await self._test_payload(session, url, payload, "Command Injection", lambda c: "vulncmd" in c)
-
-    async def scan(self, base_url):
-        urls = list(set(self.normalize_url(u) for u in await self.crawl(base_url)))
-        self.total_urls = len(urls)
-        self.progress_bar["maximum"] = self.total_urls
-
-        async with aiohttp.ClientSession() as session:
             tasks = []
-            for url in urls:
-                tasks.extend([
-                    self.test_xss(session, url),
-                    self.test_sqli(session, url),
-                    self.test_cmd_injection(session, url)
-                ])
+            if enable_sql:
+                tasks.append(scan_sql_injection(session, url, results))
+            if enable_xss:
+                tasks.append(scan_xss(session, url, results))
+            if enable_cmdi:
+                tasks.append(scan_command_injection(session, url, results))
+
             await asyncio.gather(*tasks)
 
-        self.generate_html_report()
-        self.log("Scan complete. HTML report generated as 'report.html'.")
-        self.start_button.config(state=tk.NORMAL)
-        self.pause_button.config(state=tk.DISABLED)
-        self.resume_button.config(state=tk.DISABLED)
+    except Exception as e:
+        results.append(f"[ERROR] {e}")
 
-    def _save_result(self, vuln_type, url, severity):
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.results.append((timestamp, vuln_type, severity, url))
-        with open("results.csv", "a", newline="") as f:
-            csv.writer(f).writerow([timestamp, vuln_type, severity, url])
+    results_callback(results)
 
-    def generate_html_report(self):
-        html = """<html><head><title>Vulnerability Report</title>
-        <style>
-        body { font-family: Arial; margin: 40px; }
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
-        th { background-color: #f4f4f4; }
-        tr:nth-child(even) { background-color: #f9f9f9; }
-        </style></head><body>
-        <h1>Vulnerability Scan Report</h1>
-        <table><tr><th>Timestamp</th><th>Type</th><th>Severity</th><th>URL</th></tr>"""
-        for row in self.results:
-            html += f"<tr><td>{row[0]}</td><td>{row[1]}</td><td>{row[2]}</td><td>{row[3]}</td></tr>"
-        html += "</table></body></html>"
-        with open("report.html", "w") as f:
-            f.write(html)
+# GUI setup
+def start_scan():
+    url = url_entry.get().strip()
+    headers = headers_text.get("1.0", tk.END).strip()
+    cookies = cookies_text.get("1.0", tk.END).strip()
+    proxy = proxy_entry.get().strip()
+    enable_sql = sql_var.get()
+    enable_xss = xss_var.get()
+    enable_cmdi = cmdi_var.get()
 
-    def save_config(self):
-        config = {
-            "url": self.get_entry_data("Target URL:"),
-            "proxies": self.parse_proxies(self.get_entry_data("Proxies (comma-separated):")),
-            "headers": self.parse_headers(self.get_entry_data("Headers (key:value, comma-separated):")),
-            "cookies": self.parse_cookies(self.get_entry_data("Cookies (key=value, comma-separated):"))
-        }
-        with open("config.json", "w") as f:
-            json.dump(config, f, indent=4)
-        self.log("Configuration saved to config.json")
+    if not url:
+        messagebox.showerror("Error", "Please enter a URL.")
+        return
 
-    def load_config(self):
-        if os.path.exists("config.json"):
-            with open("config.json", "r") as f:
-                config = json.load(f)
-            self.entries["Target URL:"].delete(0, tk.END)
-            self.entries["Target URL:"].insert(0, config.get("url", ""))
-            self.entries["Proxies (comma-separated):"].delete(0, tk.END)
-            self.entries["Proxies (comma-separated):"].insert(0, ",".join(config.get("proxies", [])))
-            self.entries["Headers (key:value, comma-separated):"].delete(0, tk.END)
-            self.entries["Headers (key:value, comma-separated):"].insert(0, ",".join(f"{k}:{v}" for k, v in config.get("headers", {}).items()))
-            self.entries["Cookies (key=value, comma-separated):"].delete(0, tk.END)
-            self.entries["Cookies (key=value, comma-separated):"].insert(0, ",".join(f"{k}={v}" for k, v in config.get("cookies", {}).items()))
-            self.log("Configuration loaded from config.json")
-        else:
-            self.log("No configuration file found.")
+    scan_button.config(state=tk.DISABLED)
+    results_box.delete("1.0", tk.END)
+    results_box.insert(tk.END, "Scanning...\n")
 
-if __name__ == "__main__":
-    root = tk.Tk()
-    app = VulnerabilityScanner(root)
-    root.mainloop()
+    def thread_target():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(run_scans(
+            url, headers, cookies, proxy, enable_sql, enable_xss, enable_cmdi,
+            lambda results: update_results(results)
+        ))
+        scan_button.config(state=tk.NORMAL)
+
+    threading.Thread(target=thread_target).start()
+
+def update_results(results):
+    results_box.delete("1.0", tk.END)
+    for line in results:
+        results_box.insert(tk.END, line + "\n")
+
+# GUI
+root = tk.Tk()
+root.title("Async Vulnerability Scanner")
+root.geometry("700x600")
+
+url_label = tk.Label(root, text="Target URL:")
+url_label.pack()
+url_entry = tk.Entry(root, width=80)
+url_entry.pack()
+
+proxy_label = tk.Label(root, text="Proxy (optional, format http://ip:port):")
+proxy_label.pack()
+proxy_entry = tk.Entry(root, width=80)
+proxy_entry.pack()
+
+headers_label = tk.Label(root, text="Custom Headers (one per line, format: Key: Value):")
+headers_label.pack()
+headers_text = scrolledtext.ScrolledText(root, height=4, width=80)
+headers_text.pack()
+
+cookies_label = tk.Label(root, text="Cookies (format: key=value; key2=value2):")
+cookies_label.pack()
+cookies_text = scrolledtext.ScrolledText(root, height=2, width=80)
+cookies_text.pack()
+
+# Module selection
+sql_var = tk.BooleanVar()
+xss_var = tk.BooleanVar()
+cmdi_var = tk.BooleanVar()
+
+sql_check = tk.Checkbutton(root, text="SQL Injection", variable=sql_var)
+sql_check.pack(anchor='w')
+xss_check = tk.Checkbutton(root, text="XSS", variable=xss_var)
+xss_check.pack(anchor='w')
+cmdi_check = tk.Checkbutton(root, text="Command Injection", variable=cmdi_var)
+cmdi_check.pack(anchor='w')
+
+scan_button = tk.Button(root, text="Start Scan", command=start_scan)
+scan_button.pack(pady=10)
+
+results_box = scrolledtext.ScrolledText(root, height=15, width=80)
+results_box.pack()
+
+root.mainloop()
