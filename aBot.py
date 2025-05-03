@@ -123,7 +123,83 @@ async def run_scans(url, headers, cookies, proxy, enable_sql, enable_xss, enable
 
     results_callback(results)
 
-# GUI setup
+# New function to crawl websites for downloadable files
+async def crawl_for_files(session, url, results, proxy):
+    file_extensions = ['.pdf', '.mp3', '.jpeg', '.jpg', '.png']
+    
+    try:
+        async with session.get(url, proxy=proxy, timeout=10) as response:
+            text = await response.text()
+            # Find all links in the page
+            links = re.findall(r'href=["\'](http[s]?://[^\s"\'<>]+)["\']', text)
+            for link in links:
+                if any(link.lower().endswith(ext) for ext in file_extensions):
+                    results.append(f"[File] Found downloadable file: {link}")
+    except Exception as e:
+        results.append(f"[File ERROR] Error while crawling {url} for files - {e}")
+
+# Modified run_scans function to include file crawling
+async def run_scans(url, headers, cookies, proxy, enable_sql, enable_xss, enable_cmdi, enable_redirect, enable_traversal, enable_file_crawl, results_callback):
+    results = []
+
+    if not any([enable_sql, enable_xss, enable_cmdi, enable_redirect, enable_traversal, enable_file_crawl]):
+        results_callback(["Please select at least one scan module."] )
+        return
+
+    try:
+        if not url.startswith("http"):
+            url = "http://" + url
+
+        timeout = aiohttp.ClientTimeout(total=15)
+        conn = aiohttp.TCPConnector(ssl=False)
+        session_headers = {}
+        session_cookies = {}
+
+        if headers:
+            try:
+                session_headers = dict([line.split(":", 1) for line in headers.split("\n") if ":" in line])
+            except:
+                results.append("[ERROR] Invalid headers format.")
+        if cookies:
+            try:
+                session_cookies = dict([cookie.strip().split("=", 1) for cookie in cookies.split(";") if "=" in cookie])
+            except:
+                results.append("[ERROR] Invalid cookies format.")
+
+        # Proxy validation
+        if proxy:
+            try:
+                async with aiohttp.ClientSession(connector=conn) as test_sess:
+                    async with test_sess.get("http://httpbin.org/ip", proxy=proxy, timeout=5) as resp:
+                        if resp.status != 200:
+                            raise Exception("Proxy not working")
+            except Exception as e:
+                results_callback([f"[PROXY ERROR] Failed to use proxy: {e}"])
+                return
+
+        async with aiohttp.ClientSession(headers=session_headers, cookies=session_cookies, connector=conn, timeout=timeout) as session:
+            tasks = []
+            if enable_sql:
+                tasks.append(scan_sql_injection(session, url, results, proxy))
+            if enable_xss:
+                tasks.append(scan_xss(session, url, results, proxy))
+            if enable_cmdi:
+                tasks.append(scan_command_injection(session, url, results, proxy))
+            if enable_redirect:
+                tasks.append(scan_open_redirect(session, url, results, proxy))
+            if enable_traversal:
+                tasks.append(scan_directory_traversal(session, url, results, proxy))
+            if enable_file_crawl:
+                tasks.append(crawl_for_files(session, url, results, proxy))
+
+            await asyncio.gather(*tasks)
+
+    except Exception as e:
+        results.append(f"[ERROR] {e}")
+
+    results_callback(results)
+
+# GUI setup with new option for file crawling
 def start_scan():
     url = url_entry.get().strip()
     headers = headers_text.get("1.0", tk.END).strip()
@@ -134,6 +210,7 @@ def start_scan():
     enable_cmdi = cmdi_var.get()
     enable_redirect = redirect_var.get()
     enable_traversal = traversal_var.get()
+    enable_file_crawl = file_crawl_var.get()  # New variable for file crawling
 
     if not url:
         messagebox.showerror("Error", "Please enter a URL.")
@@ -147,7 +224,7 @@ def start_scan():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(run_scans(
-            url, headers, cookies, proxy, enable_sql, enable_xss, enable_cmdi, enable_redirect, enable_traversal,
+            url, headers, cookies, proxy, enable_sql, enable_xss, enable_cmdi, enable_redirect, enable_traversal, enable_file_crawl,
             lambda results: update_results(results)
         ))
         scan_button.config(state=tk.NORMAL)
@@ -162,7 +239,7 @@ def update_results(results):
 # GUI
 root = tk.Tk()
 root.title("aBot Vulnerability Scanner")
-root.geometry("700x650")
+root.geometry("700x700")
 
 url_label = tk.Label(root, text="Target URL:")
 url_label.pack()
@@ -190,6 +267,7 @@ xss_var = tk.BooleanVar()
 cmdi_var = tk.BooleanVar()
 redirect_var = tk.BooleanVar()
 traversal_var = tk.BooleanVar()
+file_crawl_var = tk.BooleanVar()  # New checkbox for file crawling
 
 sql_check = tk.Checkbutton(root, text="SQL Injection", variable=sql_var)
 sql_check.pack(anchor='w')
@@ -201,6 +279,8 @@ redirect_check = tk.Checkbutton(root, text="Open Redirect", variable=redirect_va
 redirect_check.pack(anchor='w')
 traversal_check = tk.Checkbutton(root, text="Directory Traversal", variable=traversal_var)
 traversal_check.pack(anchor='w')
+file_crawl_check = tk.Checkbutton(root, text="Crawl for Downloadable Files", variable=file_crawl_var)
+file_crawl_check.pack(anchor='w')  # New checkbox for file crawling
 
 scan_button = tk.Button(root, text="Start Scan", command=start_scan)
 scan_button.pack(pady=10)
