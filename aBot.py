@@ -6,46 +6,46 @@ import threading
 import re
 
 # Vulnerability scanning functions
-async def scan_sql_injection(session, url, results):
+async def scan_sql_injection(session, url, results, proxy):
     test_payloads = ["'", "' OR '1'='1"]
     for payload in test_payloads:
         test_url = f"{url}?test={payload}"
         try:
-            async with session.get(test_url, timeout=10) as response:
+            async with session.get(test_url, proxy=proxy, timeout=10) as response:
                 text = await response.text()
                 if "sql" in text.lower() or "syntax" in text.lower():
                     results.append(f"[SQLi] {test_url} may be vulnerable.")
         except Exception as e:
             results.append(f"[SQLi ERROR] {test_url} - {e}")
 
-async def scan_xss(session, url, results):
+async def scan_xss(session, url, results, proxy):
     payload = "<script>alert(1)</script>"
     test_url = f"{url}?q={payload}"
     try:
-        async with session.get(test_url, timeout=10) as response:
+        async with session.get(test_url, proxy=proxy, timeout=10) as response:
             text = await response.text()
             if payload in text:
                 results.append(f"[XSS] {test_url} may be vulnerable.")
     except Exception as e:
         results.append(f"[XSS ERROR] {test_url} - {e}")
 
-async def scan_command_injection(session, url, results):
+async def scan_command_injection(session, url, results, proxy):
     payloads = [';id', '&& whoami']
     for payload in payloads:
         test_url = f"{url}?cmd={payload}"
         try:
-            async with session.get(test_url, timeout=10) as response:
+            async with session.get(test_url, proxy=proxy, timeout=10) as response:
                 text = await response.text()
                 if "uid=" in text or "root" in text or "whoami" in text:
                     results.append(f"[CMDi] {test_url} may be vulnerable.")
         except Exception as e:
             results.append(f"[CMDi ERROR] {test_url} - {e}")
 
-async def scan_open_redirect(session, url, results):
+async def scan_open_redirect(session, url, results, proxy):
     payload = "http://evil.com"
     test_url = f"{url}?redirect={payload}"
     try:
-        async with session.get(test_url, allow_redirects=False, timeout=10) as response:
+        async with session.get(test_url, allow_redirects=False, proxy=proxy, timeout=10) as response:
             if response.status in [301, 302, 303, 307, 308]:
                 location = response.headers.get("Location", "")
                 if payload in location:
@@ -53,12 +53,12 @@ async def scan_open_redirect(session, url, results):
     except Exception as e:
         results.append(f"[Redirect ERROR] {test_url} - {e}")
 
-async def scan_directory_traversal(session, url, results):
+async def scan_directory_traversal(session, url, results, proxy):
     payloads = ["../../etc/passwd", "..%2F..%2Fetc%2Fpasswd"]
     for payload in payloads:
         test_url = f"{url}?file={payload}"
         try:
-            async with session.get(test_url, timeout=10) as response:
+            async with session.get(test_url, proxy=proxy, timeout=10) as response:
                 text = await response.text()
                 if "root:x:" in text:
                     results.append(f"[DirTraversal] {test_url} may be vulnerable.")
@@ -69,7 +69,7 @@ async def run_scans(url, headers, cookies, proxy, enable_sql, enable_xss, enable
     results = []
 
     if not any([enable_sql, enable_xss, enable_cmdi, enable_redirect, enable_traversal]):
-        results_callback(["Please select at least one scan module."])
+        results_callback(["Please select at least one scan module."] )
         return
 
     try:
@@ -92,21 +92,29 @@ async def run_scans(url, headers, cookies, proxy, enable_sql, enable_xss, enable
             except:
                 results.append("[ERROR] Invalid cookies format.")
 
-        async with aiohttp.ClientSession(headers=session_headers, cookies=session_cookies, connector=conn, timeout=timeout) as session:
-            if proxy:
-                session._default_proxy = proxy
+        # Proxy validation
+        if proxy:
+            try:
+                async with aiohttp.ClientSession(connector=conn) as test_sess:
+                    async with test_sess.get("http://httpbin.org/ip", proxy=proxy, timeout=5) as resp:
+                        if resp.status != 200:
+                            raise Exception("Proxy not working")
+            except Exception as e:
+                results_callback([f"[PROXY ERROR] Failed to use proxy: {e}"])
+                return
 
+        async with aiohttp.ClientSession(headers=session_headers, cookies=session_cookies, connector=conn, timeout=timeout) as session:
             tasks = []
             if enable_sql:
-                tasks.append(scan_sql_injection(session, url, results))
+                tasks.append(scan_sql_injection(session, url, results, proxy))
             if enable_xss:
-                tasks.append(scan_xss(session, url, results))
+                tasks.append(scan_xss(session, url, results, proxy))
             if enable_cmdi:
-                tasks.append(scan_command_injection(session, url, results))
+                tasks.append(scan_command_injection(session, url, results, proxy))
             if enable_redirect:
-                tasks.append(scan_open_redirect(session, url, results))
+                tasks.append(scan_open_redirect(session, url, results, proxy))
             if enable_traversal:
-                tasks.append(scan_directory_traversal(session, url, results))
+                tasks.append(scan_directory_traversal(session, url, results, proxy))
 
             await asyncio.gather(*tasks)
 
