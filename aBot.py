@@ -41,10 +41,34 @@ async def scan_command_injection(session, url, results):
         except Exception as e:
             results.append(f"[CMDi ERROR] {test_url} - {e}")
 
-async def run_scans(url, headers, cookies, proxy, enable_sql, enable_xss, enable_cmdi, results_callback):
+async def scan_open_redirect(session, url, results):
+    payload = "http://evil.com"
+    test_url = f"{url}?redirect={payload}"
+    try:
+        async with session.get(test_url, allow_redirects=False, timeout=10) as response:
+            if response.status in [301, 302, 303, 307, 308]:
+                location = response.headers.get("Location", "")
+                if payload in location:
+                    results.append(f"[Redirect] {test_url} may be vulnerable to open redirect.")
+    except Exception as e:
+        results.append(f"[Redirect ERROR] {test_url} - {e}")
+
+async def scan_directory_traversal(session, url, results):
+    payloads = ["../../etc/passwd", "..%2F..%2Fetc%2Fpasswd"]
+    for payload in payloads:
+        test_url = f"{url}?file={payload}"
+        try:
+            async with session.get(test_url, timeout=10) as response:
+                text = await response.text()
+                if "root:x:" in text:
+                    results.append(f"[DirTraversal] {test_url} may be vulnerable.")
+        except Exception as e:
+            results.append(f"[DirTraversal ERROR] {test_url} - {e}")
+
+async def run_scans(url, headers, cookies, proxy, enable_sql, enable_xss, enable_cmdi, enable_redirect, enable_traversal, results_callback):
     results = []
 
-    if not any([enable_sql, enable_xss, enable_cmdi]):
+    if not any([enable_sql, enable_xss, enable_cmdi, enable_redirect, enable_traversal]):
         results_callback(["Please select at least one scan module."])
         return
 
@@ -79,6 +103,10 @@ async def run_scans(url, headers, cookies, proxy, enable_sql, enable_xss, enable
                 tasks.append(scan_xss(session, url, results))
             if enable_cmdi:
                 tasks.append(scan_command_injection(session, url, results))
+            if enable_redirect:
+                tasks.append(scan_open_redirect(session, url, results))
+            if enable_traversal:
+                tasks.append(scan_directory_traversal(session, url, results))
 
             await asyncio.gather(*tasks)
 
@@ -96,6 +124,8 @@ def start_scan():
     enable_sql = sql_var.get()
     enable_xss = xss_var.get()
     enable_cmdi = cmdi_var.get()
+    enable_redirect = redirect_var.get()
+    enable_traversal = traversal_var.get()
 
     if not url:
         messagebox.showerror("Error", "Please enter a URL.")
@@ -109,7 +139,7 @@ def start_scan():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         loop.run_until_complete(run_scans(
-            url, headers, cookies, proxy, enable_sql, enable_xss, enable_cmdi,
+            url, headers, cookies, proxy, enable_sql, enable_xss, enable_cmdi, enable_redirect, enable_traversal,
             lambda results: update_results(results)
         ))
         scan_button.config(state=tk.NORMAL)
@@ -124,7 +154,7 @@ def update_results(results):
 # GUI
 root = tk.Tk()
 root.title("Async Vulnerability Scanner")
-root.geometry("700x600")
+root.geometry("700x650")
 
 url_label = tk.Label(root, text="Target URL:")
 url_label.pack()
@@ -150,6 +180,8 @@ cookies_text.pack()
 sql_var = tk.BooleanVar()
 xss_var = tk.BooleanVar()
 cmdi_var = tk.BooleanVar()
+redirect_var = tk.BooleanVar()
+traversal_var = tk.BooleanVar()
 
 sql_check = tk.Checkbutton(root, text="SQL Injection", variable=sql_var)
 sql_check.pack(anchor='w')
@@ -157,6 +189,10 @@ xss_check = tk.Checkbutton(root, text="XSS", variable=xss_var)
 xss_check.pack(anchor='w')
 cmdi_check = tk.Checkbutton(root, text="Command Injection", variable=cmdi_var)
 cmdi_check.pack(anchor='w')
+redirect_check = tk.Checkbutton(root, text="Open Redirect", variable=redirect_var)
+redirect_check.pack(anchor='w')
+traversal_check = tk.Checkbutton(root, text="Directory Traversal", variable=traversal_var)
+traversal_check.pack(anchor='w')
 
 scan_button = tk.Button(root, text="Start Scan", command=start_scan)
 scan_button.pack(pady=10)
